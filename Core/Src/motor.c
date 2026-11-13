@@ -1,7 +1,9 @@
 #include "motor.h"
 
 extern TIM_HandleTypeDef htim1;
-#define MOTOR_MAX_PWM 8999
+
+// CHANGED: Max PWM is now 255
+#define MOTOR_MAX_PWM 255
 
 void Motor_Init(void) {
     HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
@@ -11,25 +13,23 @@ void Motor_Init(void) {
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);
 }
 
-void Motor_SetSpeed(float speed_percent) {
-    // Limit speed to -100% to +100%
-    if (speed_percent > 100.0f) speed_percent = 100.0f;
-    if (speed_percent < -100.0f) speed_percent = -100.0f;
+void Motor_SetPWM(int32_t pwm_value) {
+    // Limit to max hardware PWM (255)
+    if (pwm_value > MOTOR_MAX_PWM) pwm_value = MOTOR_MAX_PWM;
+    if (pwm_value < -MOTOR_MAX_PWM) pwm_value = -MOTOR_MAX_PWM;
 
-    uint32_t pwm_value = (uint32_t)((fabsf(speed_percent) * MOTOR_MAX_PWM) / 100.0f);
-
-    if (speed_percent > 0.5f) {
+    if (pwm_value > 5) {
         // FORWARD
-        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pwm_value); // RPWM
-        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);         // LPWM
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pwm_value);
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);
     }
-    else if (speed_percent < -0.5f) {
+    else if (pwm_value < -5) {
         // BACKWARD
-        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0);         // RPWM
-        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, pwm_value); // LPWM
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0);
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, -pwm_value);
     }
     else {
-        // STOP
+        // STOP (Deadband)
         __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0);
         __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);
     }
