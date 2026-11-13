@@ -1,0 +1,2 @@
+../Core/Src/encoder.c:9:6:Encoder_Init	1
+../Core/Src/encoder.c:16:9:Encoder_GetCount	2
