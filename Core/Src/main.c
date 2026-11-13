@@ -2,6 +2,7 @@
 #include "main.h"
 #include "motor.h"
 #include "encoder.h"
+#include "pid.h"
 #include <stdio.h>
 #include <string.h>
 /* USER CODE END Header */
@@ -28,12 +29,17 @@ int main(void)
   /* USER CODE BEGIN 2 */
   char printMessage[50] = {'\0'};
 
+  // 1. Configuration du PID
+  PID_Controller posPID;
+  // Kp = 1.5, Ki = 0.1, Kd = 0.5 (Valeurs douces pour ne pas trembler)
+  PID_Init(&posPID, 1.5f, 0.0f, 0.0f, 255.0f, -255.0f);
+
+  float target_position = 6000.0f; // Cible : 6000 counts
+
   Motor_Init();
   Encoder_Init();
 
-  // Start the motor at 50% power (127 out of 255) Forward
-  Motor_SetPWM(127);
-
+  uint32_t last_pid_tick = 0;
   HAL_Delay(1000);
   /* USER CODE END 2 */
 
@@ -45,13 +51,30 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    // Read encoder and print to Python
-    int32_t count = Encoder_GetCount();
+    // Le PID tourne toutes les 20ms
+    if (HAL_GetTick() - last_pid_tick >= 20)
+    {
+        float dt = (HAL_GetTick() - last_pid_tick) / 1000.0f;
+        last_pid_tick = HAL_GetTick();
 
-    sprintf(printMessage, "%d,0,0\r\n", count);
-    HAL_UART_Transmit(&huart2, (uint8_t*)printMessage, strlen(printMessage), 100);
+        // 1. Lire la position actuelle
+        float current_position = (float)Encoder_GetCount();
 
-    HAL_Delay(50); // Print every 50ms
+        // 2. Calculer le PID
+        float pid_output = PID_Compute(&posPID, target_position, current_position, dt);
+
+        // 3. Envoyer au moteur
+        Motor_SetPWM((int32_t)pid_output);
+
+        // 4. Envoyer à Python toutes les 50ms
+        static uint32_t last_print = 0;
+        if (HAL_GetTick() - last_print >= 50) {
+            last_print = HAL_GetTick();
+            sprintf(printMessage, "%d,%d,%d\r\n",
+                    (int)target_position, (int)current_position, (int)pid_output);
+            HAL_UART_Transmit(&huart2, (uint8_t*)printMessage, strlen(printMessage), 100);
+        }
+    }
   }
   /* USER CODE END 3 */
 }
@@ -152,11 +175,11 @@ static void MX_TIM3_Init(void)
   sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC1Filter = 0;
+  sConfig.IC1Filter = 15; // Filtre à fond pour éviter le bruit
   sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
-  sConfig.IC2Filter = 0;
+  sConfig.IC2Filter = 15; // Filtre à fond
   if (HAL_TIM_Encoder_Init(&htim3, &sConfig) != HAL_OK) { Error_Handler(); }
 
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
