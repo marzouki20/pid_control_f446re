@@ -1,4 +1,5 @@
 /* USER CODE BEGIN Header */
+/* USER CODE BEGIN Header */
 #include "main.h"
 #include "motor.h"
 #include "encoder.h"
@@ -31,15 +32,18 @@ int main(void)
 
   // 1. Configuration du PID
   PID_Controller posPID;
-  // Kp = 1.5, Ki = 0.1, Kd = 0.5 (Valeurs douces pour ne pas trembler)
-  PID_Init(&posPID, 1.5f, 0.0f, 0.0f, 255.0f, -255.0f);
+  PID_Init(&posPID, 0.1787f, 0.001f, 0.0f, 255.0f, -255.0f);
 
-  float target_position = 6000.0f; // Cible : 6000 counts
+  float target_position = 10000.0f;
 
   Motor_Init();
   Encoder_Init();
 
   uint32_t last_pid_tick = 0;
+
+  // Variable pour le lissage du PWM (Démarrage doux)
+  float smooth_pwm = 0.0f;
+
   HAL_Delay(1000);
   /* USER CODE END 2 */
 
@@ -51,8 +55,8 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    // Le PID tourne toutes les 20ms
-    if (HAL_GetTick() - last_pid_tick >= 20)
+    // Le PID tourne toutes les 10ms (100Hz)
+    if (HAL_GetTick() - last_pid_tick >= 1)
     {
         float dt = (HAL_GetTick() - last_pid_tick) / 1000.0f;
         last_pid_tick = HAL_GetTick();
@@ -63,21 +67,35 @@ int main(void)
         // 2. Calculer le PID
         float pid_output = PID_Compute(&posPID, target_position, current_position, dt);
 
-        // 3. Envoyer au moteur
-        Motor_SetPWM((int32_t)pid_output);
+        // 3. LISSAGE DU PWM
+        // CHANGÉ ICI : max_step passe à 15.0f (montée de +15 toutes les 10ms)
+        float max_step = 1.0f;
 
-        // 4. Envoyer à Python toutes les 50ms
+        if (pid_output > smooth_pwm) {
+            smooth_pwm += max_step;
+            if (smooth_pwm > pid_output) smooth_pwm = pid_output;
+        } else if (pid_output < smooth_pwm) {
+            smooth_pwm -= max_step;
+            if (smooth_pwm < pid_output) smooth_pwm = pid_output;
+        }
+
+        // 4. Envoyer au moteur (avec le lissage)
+        Motor_SetPWM((int32_t)smooth_pwm);
+
+        // 5. Envoyer à Python
         static uint32_t last_print = 0;
-        if (HAL_GetTick() - last_print >= 50) {
+        if (HAL_GetTick() - last_print >= 1) {
             last_print = HAL_GetTick();
             sprintf(printMessage, "%d,%d,%d\r\n",
-                    (int)target_position, (int)current_position, (int)pid_output);
+                    (int)target_position, (int)current_position, (int)smooth_pwm);
             HAL_UART_Transmit(&huart2, (uint8_t*)printMessage, strlen(printMessage), 100);
         }
     }
   }
   /* USER CODE END 3 */
 }
+
+// ... (Tes fonctions SystemClock_Config, MX_TIM1_Init, MX_TIM3_Init, etc. restent identiques)
 
 /**
   * @brief System Clock Configuration
