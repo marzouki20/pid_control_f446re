@@ -1,3 +1,4 @@
+"./Core/Src/auto_tuning.o"
 "./Core/Src/bts7960.o"
 "./Core/Src/encoder.o"
 "./Core/Src/main.o"

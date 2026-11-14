@@ -3,7 +3,7 @@
 extern TIM_HandleTypeDef htim1;
 
 // CHANGED: Max PWM is now 255
-#define MOTOR_MAX_PWM 255
+#define MOTOR_MAX_PWM 999
 
 void Motor_Init(void) {
     HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
