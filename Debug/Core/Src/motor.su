@@ -1,3 +1,4 @@
-../Core/Src/motor.c:8:6:Motor_Init	8	static
-../Core/Src/motor.c:16:6:Motor_SetPWM	16	static
-../Core/Src/motor.c:38:6:Motor_Stop	4	static
+../Core/Src/motor.c:12:6:Motor_Init	8	static
+../Core/Src/motor.c:38:6:Motor_SetSpeed_Gauche	24	static
+../Core/Src/motor.c:64:6:Motor_SetSpeed_Droite	24	static
+../Core/Src/motor.c:90:6:Motor_Stop	4	static

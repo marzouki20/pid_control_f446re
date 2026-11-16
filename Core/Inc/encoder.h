@@ -3,7 +3,11 @@
 
 #include "main.h"
 
+// Initialisation des deux encodeurs
 void Encoder_Init(void);
-int32_t Encoder_GetCount(void);
+
+// Fonctions pour lire chaque encodeur indépendamment
+int32_t Encoder_GetCount_Gauche(void);
+int32_t Encoder_GetCount_Droite(void);
 
 #endif /* INC_ENCODER_H_ */
