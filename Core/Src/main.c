@@ -28,9 +28,11 @@ static void MX_TIM4_Init(void);
 #define TX_BUF_SIZE   64
 
 #define MAX_PWM        999.0f
-#define MIN_PWM        100.0f   // PWM minimum pour demarrer (a ajuster)
+#define MIN_PWM        100.0f   // PWM minimum en phase d'arret final
 #define DEADBAND_CM    0.20f
-#define K_SYNC         25.0f    // PWM par cm d'ecart entre les roues
+#define K_SYNC         60.0f    // PWM par cm d'ecart de progression entre roues
+#define TURN_SCALE     0.6f     // vitesse reduite en rotation sur place (moins de glissement)
+#define TURN_ACC_SCALE 0.5f     // acceleration reduite en rotation sur place
 #define LOOP_MS        20
 #define DT_S           0.020f
 
@@ -42,16 +44,11 @@ static uint16_t tx_len = 0, tx_pos = 0;
 /* USER CODE END PV */
 
 /* USER CODE BEGIN 0 */
-/*
- * UART 100% polling : AUCUNE interruption, AUCUN USART2_IRQHandler requis.
- * (Avant : HAL_UART_Receive_IT sans handler = le MCU se figeait au 1er octet recu)
- * A appeler le plus souvent possible dans la boucle principale.
- */
+// UART 100% polling (aucun USART2_IRQHandler requis)
 static void uart_service(void)
 {
-  // --- RX : on vide le registre dans le ring buffer ---
   while (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
-    uint8_t b = (uint8_t)(huart2.Instance->DR & 0xFF);   // lire DR efface aussi ORE/FE/NE
+    uint8_t b = (uint8_t)(huart2.Instance->DR & 0xFF);
     uint16_t next = (uint16_t)((rx_head + 1) % RX_BUF_SIZE);
     if (next != rx_tail) { rx_ring[rx_head] = b; rx_head = next; }
   }
@@ -59,14 +56,29 @@ static void uart_service(void)
     (void)huart2.Instance->SR;
     (void)huart2.Instance->DR;
   }
-
-  // --- TX non bloquant : 1 octet des que TXE est libre ---
   if (tx_pos < tx_len && __HAL_UART_GET_FLAG(&huart2, UART_FLAG_TXE)) {
     huart2.Instance->DR = (uint8_t)tx_buf[tx_pos++];
   }
 }
 
 static inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// Profil trapezoidal : position (cm) le long de L a l'instant t, vitesse dans *v
+static float profile(float L, float t, float vmax, float acc, float *v, uint8_t *done)
+{
+  float ta = vmax / acc;
+  float da = 0.5f * acc * ta * ta;
+  float vp = vmax, tc;
+  if (2.0f * da > L) { vp = sqrtf(L * acc); ta = vp / acc; da = 0.5f * L; tc = 0.0f; }
+  else               { tc = (L - 2.0f * da) / vmax; }
+  float T = 2.0f * ta + tc;
+  *done = 0;
+  if (t >= T)         { *v = 0.0f; *done = 1; return L; }
+  if (t < ta)         { *v = acc * t; return 0.5f * acc * t * t; }
+  if (t < ta + tc)    { *v = vp; return da + vp * (t - ta); }
+  float td = T - t;   *v = acc * td;
+  return L - 0.5f * acc * td * td;
+}
 /* USER CODE END 0 */
 
 int main(void)
@@ -95,15 +107,23 @@ int main(void)
   PID_Controller pidGauche, pidDroite;
   float Kp_G = 40.0f, Ki_G = 0.5f, Kd_G = 1.5f;
   float Kp_D = 40.0f, Ki_D = 0.5f, Kd_D = 1.5f;
-
   PID_Init(&pidGauche, Kp_G, Ki_G, Kd_G, MAX_PWM, -MAX_PWM);
   PID_Init(&pidDroite, Kp_D, Ki_D, Kd_D, MAX_PWM, -MAX_PWM);
+
+  // --- Reglages modifiables par liaison serie : V, A, F, C ---
+  float vmax_cmd = 40.0f;    // cm/s  (V<val>) : garde < vitesse libre du moteur le plus lent
+  float acc_cmd  = 150.0f;   // cm/s2 (A<val>)
+  float Kff      = 12.0f;    // PWM par cm/s (F<val>) : anticipation de vitesse
+  float corr_D   = 1.0f;     // (C<val>) correction diametre roue droite (calibration ligne droite)
 
   float target_cm_G = 0.0f, target_cm_D = 0.0f;
   float current_cm_G = 0.0f, current_cm_D = 0.0f;
   uint32_t last_loop_tick = 0, last_print = 0;
 
-  // Mode test moteurs en boucle ouverte : "M,pwmG,pwmD" (dure 1 s)
+  uint8_t  prof_active = 0;
+  uint32_t move_t0 = 0;
+  float    prof_L = 0.0f, vm_used = 40.0f, acc_used = 150.0f;
+
   uint8_t  ol_mode = 0;
   int32_t  ol_G = 0, ol_D = 0;
   uint32_t ol_until = 0;
@@ -138,6 +158,13 @@ int main(void)
             current_cm_D = 0.0f;
             PID_Init(&pidGauche, Kp_G, Ki_G, Kd_G, MAX_PWM, -MAX_PWM);
             PID_Init(&pidDroite, Kp_D, Ki_D, Kd_D, MAX_PWM, -MAX_PWM);
+
+            float aG = fabsf(target_cm_G), aD = fabsf(target_cm_D);
+            prof_L  = (aG > aD) ? aG : aD;
+            vm_used = (target_cm_G * target_cm_D < 0.0f) ? vmax_cmd * TURN_SCALE : vmax_cmd;
+            acc_used = (target_cm_G * target_cm_D < 0.0f) ? acc_cmd * TURN_ACC_SCALE : acc_cmd;
+            move_t0 = HAL_GetTick();
+            prof_active = (prof_L > 0.05f);
           }
         }
         else if (rx_buffer[0] == 'M' && rx_buffer[1] == ',') {
@@ -145,16 +172,22 @@ int main(void)
           if (sscanf(rx_buffer, "M,%d,%d", &a, &b) == 2) {
             ol_G = a; ol_D = b;
             ol_mode = 1;
+            prof_active = 0;
             ol_until = HAL_GetTick() + 1000;
           }
         }
         else if (rx_buffer[0] == 'X') {
           ol_mode = 0;
+          prof_active = 0;
           target_cm_G = current_cm_G;
           target_cm_D = current_cm_D;
           PID_Init(&pidGauche, Kp_G, Ki_G, Kd_G, MAX_PWM, -MAX_PWM);
           PID_Init(&pidDroite, Kp_D, Ki_D, Kd_D, MAX_PWM, -MAX_PWM);
         }
+        else if (rx_buffer[0] == 'V') { float v = (float)atof(&rx_buffer[1]); if (v > 5.0f)  vmax_cmd = v; }
+        else if (rx_buffer[0] == 'A') { float v = (float)atof(&rx_buffer[1]); if (v > 10.0f) acc_cmd  = v; }
+        else if (rx_buffer[0] == 'F') { Kff = (float)atof(&rx_buffer[1]); }
+        else if (rx_buffer[0] == 'C') { float v = (float)atof(&rx_buffer[1]); if (v > 0.5f && v < 2.0f) corr_D = v; }
         else if (rx_buffer[1] == 'G' || rx_buffer[1] == 'D') {
           float v = (float)atof(&rx_buffer[2]);
           char k = rx_buffer[0], side = rx_buffer[1];
@@ -177,11 +210,10 @@ int main(void)
       last_loop_tick = HAL_GetTick();
 
       current_cm_G = (float)Encoder_GetCount_Gauche() / TICKS_PER_CM;
-      current_cm_D = (float)Encoder_GetCount_Droite() / TICKS_PER_CM;
+      current_cm_D = (float)Encoder_GetCount_Droite() / TICKS_PER_CM * corr_D;
       uart_service();
 
       if (ol_mode) {
-        // ---- Test moteurs : PWM direct, coupe apres 1 s ----
         if ((int32_t)(HAL_GetTick() - ol_until) >= 0) {
           ol_mode = 0;
           Motor_SetSpeed_Gauche(0);
@@ -195,50 +227,65 @@ int main(void)
           Motor_SetSpeed_Droite((int32_t)clampf((float)ol_D, -MAX_PWM, MAX_PWM));
         }
       } else {
-        // ---- PID position ----
+        // ---- Consigne : profil trapezoidal identique pour les 2 roues ----
+        float spG = target_cm_G, spD = target_cm_D, vG = 0.0f, vD = 0.0f;
+        if (prof_active) {
+          float t = (float)(HAL_GetTick() - move_t0) / 1000.0f;
+          float v = 0.0f;
+          uint8_t done = 0;
+          float pos  = profile(prof_L, t, vm_used, acc_used, &v, &done);
+          float frac = pos / prof_L;
+          spG = target_cm_G * frac;
+          spD = target_cm_D * frac;
+          vG  = target_cm_G / prof_L * v;
+          vD  = target_cm_D / prof_L * v;
+          if (done) prof_active = 0;
+        }
+
         float errG = target_cm_G - current_cm_G;
         float errD = target_cm_D - current_cm_D;
 
-        float outG = PID_Compute(&pidGauche, target_cm_G, current_cm_G, DT_S);
-        float outD = PID_Compute(&pidDroite, target_cm_D, current_cm_D, DT_S);
+        // PID (suivi de consigne) + anticipation de vitesse
+        float outG = PID_Compute(&pidGauche, spG, current_cm_G, DT_S) + Kff * vG;
+        float outD = PID_Compute(&pidDroite, spD, current_cm_D, DT_S) + Kff * vD;
         uart_service();
-
         outG = clampf(outG, -MAX_PWM, MAX_PWM);
         outD = clampf(outD, -MAX_PWM, MAX_PWM);
 
-        // Synchro des roues (ligne droite / rotation sur place)
-        float sgnG = (target_cm_G >= 0) ? 1.0f : -1.0f;
-        float sgnD = (target_cm_D >= 0) ? 1.0f : -1.0f;
-        if (fabsf(target_cm_G) > 1.0f && fabsf(target_cm_D) > 1.0f &&
-            fabsf(fabsf(target_cm_G) - fabsf(target_cm_D)) < 1.0f &&
-            (fabsf(errG) > DEADBAND_CM || fabsf(errD) > DEADBAND_CM)) {
-          float diff = (current_cm_G * sgnG) - (current_cm_D * sgnD);   // >0 : G en avance
-          float corr = K_SYNC * diff;
-          outG -= sgnG * corr;
-          outD += sgnD * corr;
-          outG = clampf(outG, -MAX_PWM, MAX_PWM);
-          outD = clampf(outD, -MAX_PWM, MAX_PWM);
-        }
-
-        // Zone morte + PWM minimum
-        if (fabsf(errG) < DEADBAND_CM) {
-          outG = 0;
-          PID_Init(&pidGauche, Kp_G, Ki_G, Kd_G, MAX_PWM, -MAX_PWM);
-        } else if (fabsf(outG) < MIN_PWM) {
-          outG = (errG > 0) ? MIN_PWM : -MIN_PWM;
-        }
-        if (fabsf(errD) < DEADBAND_CM) {
-          outD = 0;
-          PID_Init(&pidDroite, Kp_D, Ki_D, Kd_D, MAX_PWM, -MAX_PWM);
-        } else if (fabsf(outD) < MIN_PWM) {
-          outD = (errD > 0) ? MIN_PWM : -MIN_PWM;
+        if (prof_active) {
+          // Couplage croise : la roue en avance de progression ralentit, l'autre accelere
+          if (fabsf(target_cm_G) > 1.0f && fabsf(target_cm_D) > 1.0f) {
+            float fracG = current_cm_G / target_cm_G;
+            float fracD = current_cm_D / target_cm_D;
+            float corr  = K_SYNC * (fracG - fracD) * prof_L;     // >0 : G en avance
+            float sgnG = (target_cm_G >= 0) ? 1.0f : -1.0f;
+            float sgnD = (target_cm_D >= 0) ? 1.0f : -1.0f;
+            outG -= sgnG * corr;
+            outD += sgnD * corr;
+            outG = clampf(outG, -MAX_PWM, MAX_PWM);
+            outD = clampf(outD, -MAX_PWM, MAX_PWM);
+          }
+        } else {
+          // Phase d'arret final : zone morte + PWM minimum
+          if (fabsf(errG) < DEADBAND_CM) {
+            outG = 0;
+            PID_Init(&pidGauche, Kp_G, Ki_G, Kd_G, MAX_PWM, -MAX_PWM);
+          } else if (fabsf(outG) < MIN_PWM) {
+            outG = (errG > 0) ? MIN_PWM : -MIN_PWM;
+          }
+          if (fabsf(errD) < DEADBAND_CM) {
+            outD = 0;
+            PID_Init(&pidDroite, Kp_D, Ki_D, Kd_D, MAX_PWM, -MAX_PWM);
+          } else if (fabsf(outD) < MIN_PWM) {
+            outD = (errD > 0) ? MIN_PWM : -MIN_PWM;
+          }
         }
 
         Motor_SetSpeed_Gauche((int32_t)outG);
         Motor_SetSpeed_Droite((int32_t)outD);
       }
 
-      // ---- Telemetrie (mm) toutes les 50 ms, non bloquante ----
+      // ---- Telemetrie (mm) toutes les 50 ms ----
       if (HAL_GetTick() - last_print >= 50 && tx_pos >= tx_len) {
         last_print = HAL_GetTick();
         int n = snprintf(tx_buf, sizeof(tx_buf), "%d,%d,%d,%d\r\n",
