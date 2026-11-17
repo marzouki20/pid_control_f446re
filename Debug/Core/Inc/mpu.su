@@ -1,0 +1,5 @@
+../Core/Inc/mpu.c:10:13:MPU_WriteReg	32	static
+../Core/Inc/mpu.c:15:13:MPU_ReadRegs	32	static
+../Core/Inc/mpu.c:19:6:MPU_Init	16	static
+../Core/Inc/mpu.c:36:6:MPU_Calibrate	24	static
+../Core/Inc/mpu.c:52:7:MPU_Get_Yaw	32	static
